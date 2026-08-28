@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Тест разбора ГУ-23</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: Segoe UI, system-ui, sans-serif; margin: 0; background: #f4f1ea; color: #1c1917; }
+    main { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-size: 1.4rem; margin: 0 0 8px; }
+    p.lead { color: #57534e; margin: 0 0 24px; line-height: 1.45; }
+    .card { background: #fff; border: 1px solid #e7e5e4; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    label { display: block; font-weight: 600; margin-bottom: 8px; }
+    input[type=file], textarea { width: 100%; box-sizing: border-box; }
+    textarea { min-height: 140px; padding: 10px; font: inherit; border: 1px solid #d6d3d1; border-radius: 8px; }
+    button { background: #1d4ed8; color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+    .status { font-size: .95rem; }
+    .ok { color: #166534; }
+    .wait { color: #a16207; }
+    .err { color: #b91c1c; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-weight: 700; }
+    .correct { background: #dcfce7; color: #166534; }
+    .reject { background: #fee2e2; color: #991b1b; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #fafaf9; padding: 12px; border-radius: 8px; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Локальный разбор ГУ-23</h1>
+    <p class="lead">
+      Это тестовая страница. Битрикс будет вызывать тот же адрес
+      <code>POST /v1/analyze</code> и забирать JSON: <code>decision</code> и <code>reply_text</code>.
+    </p>
+    <div class="card">
+      <div id="health" class="status wait">Проверяю модель…</div>
+    </div>
+    <div class="card">
+      <label for="file">PDF акта</label>
+      <input id="file" type="file" accept="application/pdf,.pdf" />
+      <div class="row">
+        <button id="pdfBtn" type="button">Разобрать PDF</button>
+      </div>
+    </div>
+    <div class="card">
+      <label for="text">Или вставьте текст (если PDF — скан)</label>
+      <textarea id="text" placeholder="Описание обстоятельств из ГУ-23…"></textarea>
+      <div class="row">
+        <button id="textBtn" type="button">Разобрать текст</button>
+      </div>
+    </div>
+    <div class="card" id="result" hidden></div>
+  </main>
+  <script>
+    const healthEl = document.getElementById("health");
+    const resultEl = document.getElementById("result");
+
+    async function pollHealth() {
+      try {
+        const res = await fetch("/v1/health");
+        const data = await res.json();
+        if (data.ready) {
+          healthEl.className = "status ok";
+          healthEl.textContent = "Модель готова: " + data.model;
+          return true;
+        }
+        healthEl.className = "status wait";
+        healthEl.textContent = "Модель: " + (data.state || "загрузка") +
+          (data.progress ? " — " + data.progress : "") +
+          (data.error ? " — " + data.error : "");
+      } catch (err) {
+        healthEl.className = "status err";
+        healthEl.textContent = "Сервис недоступен. docker compose up?";
+      }
+      return false;
+    }
+
+    function render(data) {
+      resultEl.hidden = false;
+      if (data.needs_ocr) {
+        resultEl.innerHTML = "<p class='err'>" + (data.message || "Нужен OCR") + "</p><pre>" +
+          JSON.stringify(data, null, 2) + "</pre>";
+        return;
+      }
+      const badge = data.decision === "correct"
+        ? "<span class='badge correct'>скорректировать</span>"
+        : "<span class='badge reject'>отклонить</span>";
+      resultEl.innerHTML =
+        "<p>" + badge + "</p>" +
+        "<p><b>Фраза для бота</b><br>" + (data.reply_text || "") + "</p>" +
+        "<pre>" + JSON.stringify(data, null, 2) + "</pre>";
+    }
+
+    async function sendPdf() {
+      const file = document.getElementById("file").files[0];
+      if (!file) { alert("Выберите PDF"); return; }
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch("/v1/analyze", { method: "POST", body });
+      render(await res.json());
+    }
+
+    async function sendText() {
+      const text = document.getElementById("text").value.trim();
+      if (text.length < 20) { alert("Вставьте текст акта"); return; }
+      const res = await fetch("/v1/analyze-text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      render(await res.json());
+    }
+
+    document.getElementById("pdfBtn").onclick = sendPdf;
+    document.getElementById("textBtn").onclick = sendText;
+
+    (async function loop() {
+      const ready = await pollHealth();
+      if (!ready) setTimeout(loop, 2000);
+    })();
+  </script>
+</body>
+</html>

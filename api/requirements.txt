@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+httpx==0.28.1
+pypdf==5.1.0
+
+# OCR
+pdf2image==1.17.0
+pytesseract==0.3.13
+Pillow==10.4.0

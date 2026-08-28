@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+uploads/
+samples/*.pdf
+samples/*.PDF
+.idea/
+.vscode/

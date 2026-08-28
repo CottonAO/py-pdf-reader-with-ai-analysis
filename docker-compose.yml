@@ -1,0 +1,36 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # Если в Docker Desktop включён NVIDIA GPU — раскомментируйте:
+    # gpus: all
+
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      # ---------- Ollama (если используется) ----------
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+
+      # ---------- Общие настройки ----------
+      API_KEY: ${API_KEY:-}                     # для Битрикса
+      LLM_PROVIDER: ${LLM_PROVIDER:-gigachat}    # ollama или gigachat
+
+      # ---------- GigaChat (если LLM_PROVIDER=gigachat) ----------
+      GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:-}   # Basic-ключ для OAuth
+      GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat-3-Ultra}
+      GIGACHAT_API_BASE: ${GIGACHAT_API_BASE:-https://api.giga.chat}
+      GIGACHAT_OAUTH_URL: ${GIGACHAT_OAUTH_URL:-https://ngw.devices.sberbank.ru:9443/api/v2/oauth}
+
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
