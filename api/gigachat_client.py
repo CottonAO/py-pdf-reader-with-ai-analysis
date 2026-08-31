@@ -1,26 +1,41 @@
 import os
-import json
 import uuid
 import time
 from typing import Any, Dict, Optional
 
 import httpx
 
-from classifier import CATEGORIES, CATEGORY_DECISION, REPLIES
+from classifier import build_classify_result, parse_model_json
 from prompt import SYSTEM_PROMPT
 from llm_client import LLMClient
 
+
+def _parse_expires_at(token_data: dict) -> float:
+    """expires_at у Сбера — unix в миллисекундах, не длительность."""
+    raw = token_data.get("expires_at")
+    if raw is None:
+        return time.time() + 25 * 60
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return time.time() + 25 * 60
+    if value > 10_000_000_000:  # миллисекунды
+        return value / 1000.0
+    if value > 1_000_000_000:  # уже секунды unix
+        return value
+    return time.time() + value
+
+
 class GigaChatClient(LLMClient):
     def __init__(self):
-        self.auth_key = os.environ.get("GIGACHAT_AUTH_KEY")
-        if not self.auth_key:
-            raise ValueError("GIGACHAT_AUTH_KEY не задан (Basic-ключ для OAuth)")
-
-        self.model = os.environ.get("GIGACHAT_MODEL", "GigaChat-Pro")
-        self.api_base = os.environ.get("GIGACHAT_API_BASE", "https://api.giga.chat")
-        self.oauth_url = os.environ.get("GIGACHAT_OAUTH_URL",
-                                        "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
-        # Для отладки можно выключить проверку SSL через переменную
+        self.auth_key = (os.environ.get("GIGACHAT_AUTH_KEY") or "").strip()
+        self.model = os.environ.get("GIGACHAT_MODEL", "GigaChat-3-Ultra")
+        self.scope = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+        self.api_base = os.environ.get("GIGACHAT_API_BASE", "https://api.giga.chat").rstrip("/")
+        self.oauth_url = os.environ.get(
+            "GIGACHAT_OAUTH_URL",
+            "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+        )
         self.verify_ssl = os.environ.get("GIGACHAT_VERIFY_SSL", "false").lower() == "true"
 
         self._status: Dict[str, Any] = {
@@ -29,33 +44,49 @@ class GigaChatClient(LLMClient):
             "progress": "",
             "error": "",
             "model": self.model,
+            "provider": "gigachat",
         }
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
+
+        if self.auth_key.lower().startswith("basic "):
+            self.auth_key = self.auth_key[6:].strip()
+        pad = len(self.auth_key) % 4
+        if self.auth_key and pad:
+            self.auth_key += "=" * (4 - pad)
+
+        if not self.auth_key:
+            self._status.update(
+                state="error",
+                ready=False,
+                error="Задайте GIGACHAT_AUTH_KEY в файле .env",
+            )
 
     @property
     def status(self) -> Dict[str, Any]:
         return self._status
 
     async def _get_access_token(self) -> str:
+        # Сбер отдаёт 400, если в Content-Type есть charset=utf-8 (httpx так делает при data=).
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
             "RqUID": str(uuid.uuid4()),
             "Authorization": f"Basic {self.auth_key}",
         }
-        data = {"scope": "GIGACHAT_API_PERS"}
+        body = f"scope={self.scope}".encode("ascii")
 
-        # Отключаем проверку SSL, если не задано иное
         async with httpx.AsyncClient(timeout=60.0, verify=self.verify_ssl) as client:
-            response = await client.post(self.oauth_url, headers=headers, data=data)
-            response.raise_for_status()
+            response = await client.post(self.oauth_url, headers=headers, content=body)
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"OAuth {response.status_code}: {(response.text or '')[:500]}"
+                )
             token_data = response.json()
             access_token = token_data.get("access_token")
             if not access_token:
                 raise RuntimeError(f"Не получен access_token: {token_data}")
-            expires_in = token_data.get("expires_at", 30 * 60)
-            self._token_expires_at = time.time() + expires_in
+            self._token_expires_at = _parse_expires_at(token_data)
             return access_token
 
     async def _ensure_valid_token(self) -> str:
@@ -64,6 +95,8 @@ class GigaChatClient(LLMClient):
         return self._access_token
 
     async def ensure_model(self) -> None:
+        if not self.auth_key:
+            return
         try:
             token = await self._ensure_valid_token()
             url = f"{self.api_base}/v1/models"
@@ -75,16 +108,10 @@ class GigaChatClient(LLMClient):
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
             self._status.update(state="ready", ready=True, progress="", error="")
-        except Exception as e:
-            self._status.update(state="error", ready=False, error=str(e))
-            raise
+        except Exception as exc:
+            self._status.update(state="error", ready=False, error=str(exc))
 
-    async def classify_text(self, text: str) -> Dict[str, Any]:
-        if not self._status["ready"]:
-            raise RuntimeError("Модель GigaChat не готова")
-
-        token = await self._ensure_valid_token()
-
+    async def _chat(self, token: str, text: str) -> httpx.Response:
         url = f"{self.api_base}/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -92,58 +119,32 @@ class GigaChatClient(LLMClient):
             "Authorization": f"Bearer {token}",
         }
         payload = {
-            "model": "GigaChat-3-Ultra",
+            "model": self.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Текст акта ГУ-23:\n\n{text[:16000]}"},
             ],
             "temperature": 0,
             "max_tokens": 1024,
-            # "response_format": {"type": "json_object"},  # <-- Закомментировали
         }
+        async with httpx.AsyncClient(timeout=120.0, verify=self.verify_ssl) as client:
+            return await client.post(url, headers=headers, json=payload)
 
+    async def classify_text(self, text: str) -> Dict[str, Any]:
+        if not self._status.get("ready"):
+            raise RuntimeError(self._status.get("error") or "Модель GigaChat не готова")
+
+        token = await self._ensure_valid_token()
+        response = await self._chat(token, text)
+        if response.status_code == 401:
+            self._access_token = None
+            token = await self._ensure_valid_token()
+            response = await self._chat(token, text)
+        response.raise_for_status()
+        body = response.json()
         try:
-            async with httpx.AsyncClient(timeout=120.0, verify=self.verify_ssl) as client:
-                response = await client.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                result = response.json()
-                raw = result["choices"][0]["message"]["content"]
-                parsed = json.loads(raw)
-        except Exception as e:
-            return {
-                "ok": False,
-                "error": str(e),
-                "debug": {"model": self.model}
-            }
-
-        category = str(parsed.get("category") or "unknown").strip()
-        if category not in CATEGORIES:
-            category = "unknown"
-
-        decision = CATEGORY_DECISION[category]
-        wagons = parsed.get("wagons") or []
-        if not isinstance(wagons, list):
-            wagons = [str(wagons)]
-
-        return {
-            "ok": True,
-            "decision": decision,
-            "reply_text": REPLIES[decision],
-            "needs_ocr": False,
-            "extracted": {
-                "legal_entity": str(parsed.get("legal_entity") or ""),
-                "station": str(parsed.get("station") or ""),
-                "act_number": str(parsed.get("act_number") or ""),
-                "act_date": str(parsed.get("act_date") or ""),
-                "wagons": [str(item) for item in wagons if item],
-                "reason_quote": str(parsed.get("reason_quote") or ""),
-            },
-            "debug": {
-                "category": category,
-                "confidence": str(parsed.get("confidence") or "low"),
-                "act_form": str(parsed.get("act_form") or "unknown"),
-                "location": str(parsed.get("location") or "unknown"),
-                "notes": str(parsed.get("notes") or ""),
-                "model": self.model,
-            },
-        }
+            raw = body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"Неожиданный ответ GigaChat: {body}") from exc
+        parsed = parse_model_json(raw)
+        return build_classify_result(parsed, self.model)

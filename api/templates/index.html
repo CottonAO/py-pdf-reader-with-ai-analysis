@@ -12,8 +12,7 @@
     p.lead { color: #57534e; margin: 0 0 24px; line-height: 1.45; }
     .card { background: #fff; border: 1px solid #e7e5e4; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
     label { display: block; font-weight: 600; margin-bottom: 8px; }
-    input[type=file], textarea { width: 100%; box-sizing: border-box; }
-    textarea { min-height: 140px; padding: 10px; font: inherit; border: 1px solid #d6d3d1; border-radius: 8px; }
+    input[type=file] { width: 100%; box-sizing: border-box; }
     button { background: #1d4ed8; color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; font: inherit; cursor: pointer; }
     button:disabled { opacity: .55; cursor: default; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
@@ -31,8 +30,9 @@
   <main>
     <h1>Локальный разбор ГУ-23</h1>
     <p class="lead">
-      Это тестовая страница. Битрикс будет вызывать тот же адрес
-      <code>POST /v1/analyze</code> и забирать JSON: <code>decision</code> и <code>reply_text</code>.
+      Тестовая страница. Битрикс будет вызывать тот же
+      <code>POST /v1/analyze</code> и забирать <code>decision</code> и <code>reply_text</code>.
+      Скан PDF сначала идёт в OCR внутри сервиса.
     </p>
     <div class="card">
       <div id="health" class="status wait">Проверяю модель…</div>
@@ -42,13 +42,6 @@
       <input id="file" type="file" accept="application/pdf,.pdf" />
       <div class="row">
         <button id="pdfBtn" type="button">Разобрать PDF</button>
-      </div>
-    </div>
-    <div class="card">
-      <label for="text">Или вставьте текст (если PDF — скан)</label>
-      <textarea id="text" placeholder="Описание обстоятельств из ГУ-23…"></textarea>
-      <div class="row">
-        <button id="textBtn" type="button">Разобрать текст</button>
       </div>
     </div>
     <div class="card" id="result" hidden></div>
@@ -77,10 +70,12 @@
       return false;
     }
 
-    function render(data) {
+    function render(data, httpOk) {
       resultEl.hidden = false;
-      if (data.needs_ocr) {
-        resultEl.innerHTML = "<p class='err'>" + (data.message || "Нужен OCR") + "</p><pre>" +
+      if (!httpOk || data.ok === false) {
+        const msg = (data.detail && (data.detail.message || JSON.stringify(data.detail)))
+          || data.message || data.error || "Ошибка запроса";
+        resultEl.innerHTML = "<p class='err'>" + msg + "</p><pre>" +
           JSON.stringify(data, null, 2) + "</pre>";
         return;
       }
@@ -99,22 +94,10 @@
       const body = new FormData();
       body.append("file", file);
       const res = await fetch("/v1/analyze", { method: "POST", body });
-      render(await res.json());
-    }
-
-    async function sendText() {
-      const text = document.getElementById("text").value.trim();
-      if (text.length < 20) { alert("Вставьте текст акта"); return; }
-      const res = await fetch("/v1/analyze-text", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      render(await res.json());
+      render(await res.json(), res.ok);
     }
 
     document.getElementById("pdfBtn").onclick = sendPdf;
-    document.getElementById("textBtn").onclick = sendText;
 
     (async function loop() {
       const ready = await pollHealth();

@@ -1,17 +1,17 @@
 import asyncio
 import json
-import re
 import os
 from typing import Any, Dict
 
 import httpx
 
-from classifier import CATEGORIES, CATEGORY_DECISION, REPLIES
+from classifier import build_classify_result, parse_model_json
 from prompt import SYSTEM_PROMPT
 from llm_client import LLMClient
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+
 
 class OllamaClient(LLMClient):
     def __init__(self):
@@ -21,6 +21,7 @@ class OllamaClient(LLMClient):
             "progress": "",
             "error": "",
             "model": OLLAMA_MODEL,
+            "provider": "ollama",
         }
         self._host = OLLAMA_HOST
         self._model = OLLAMA_MODEL
@@ -83,16 +84,6 @@ class OllamaClient(LLMClient):
             names.add(name.split(":")[0])
         return names
 
-    def _strip_json(self, raw: str) -> str:
-        text = raw.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
-        text = re.sub(r"\s*```$", "", text)
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            return text[start:end+1]
-        return text
-
     async def classify_text(self, text: str) -> Dict[str, Any]:
         if not self._status.get("ready"):
             raise RuntimeError("Модель ещё не готова")
@@ -113,35 +104,5 @@ class OllamaClient(LLMClient):
             body = response.json()
 
         raw = ((body.get("message") or {}).get("content")) or ""
-        parsed = json.loads(self._strip_json(raw))
-        category = str(parsed.get("category") or "unknown").strip()
-        if category not in CATEGORIES:
-            category = "unknown"
-
-        decision = CATEGORY_DECISION[category]
-        wagons = parsed.get("wagons") or []
-        if not isinstance(wagons, list):
-            wagons = [str(wagons)]
-
-        return {
-            "ok": True,
-            "decision": decision,
-            "reply_text": REPLIES[decision],
-            "needs_ocr": False,
-            "extracted": {
-                "legal_entity": str(parsed.get("legal_entity") or ""),
-                "station": str(parsed.get("station") or ""),
-                "act_number": str(parsed.get("act_number") or ""),
-                "act_date": str(parsed.get("act_date") or ""),
-                "wagons": [str(item) for item in wagons if item],
-                "reason_quote": str(parsed.get("reason_quote") or ""),
-            },
-            "debug": {
-                "category": category,
-                "confidence": str(parsed.get("confidence") or "low"),
-                "act_form": str(parsed.get("act_form") or "unknown"),
-                "location": str(parsed.get("location") or "unknown"),
-                "notes": str(parsed.get("notes") or ""),
-                "model": self._model,
-            },
-        }
+        parsed = parse_model_json(raw)
+        return build_classify_result(parsed, self._model)

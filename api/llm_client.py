@@ -21,7 +21,7 @@ class LLMClient(ABC):
         pass
 
 def create_llm_client() -> LLMClient:
-    provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    provider = os.environ.get("LLM_PROVIDER", "gigachat").lower()
     if provider == "gigachat":
         from gigachat_client import GigaChatClient   # абсолютный импорт
         return GigaChatClient()
