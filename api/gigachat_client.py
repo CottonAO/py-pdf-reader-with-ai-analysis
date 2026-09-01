@@ -8,6 +8,7 @@ import httpx
 from classifier import build_classify_result, parse_model_json
 from prompt import SYSTEM_PROMPT
 from llm_client import LLMClient
+from security import apply_security_checks, wrap_user_document
 
 
 def _parse_expires_at(token_data: dict) -> float:
@@ -122,7 +123,7 @@ class GigaChatClient(LLMClient):
             "model": self.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Текст акта ГУ-23:\n\n{text[:16000]}"},
+                {"role": "user", "content": wrap_user_document(text)},
             ],
             "temperature": 0,
             "max_tokens": 1024,
@@ -147,4 +148,5 @@ class GigaChatClient(LLMClient):
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"Неожиданный ответ GigaChat: {body}") from exc
         parsed = parse_model_json(raw)
-        return build_classify_result(parsed, self.model)
+        result = build_classify_result(parsed, self.model)
+        return apply_security_checks(text, result)

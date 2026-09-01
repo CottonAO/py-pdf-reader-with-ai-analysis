@@ -8,6 +8,7 @@ import httpx
 from classifier import build_classify_result, parse_model_json
 from prompt import SYSTEM_PROMPT
 from llm_client import LLMClient
+from security import apply_security_checks, wrap_user_document
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
@@ -92,7 +93,7 @@ class OllamaClient(LLMClient):
             "model": self._model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Текст акта ГУ-23:\n\n{text[:16000]}"},
+                {"role": "user", "content": wrap_user_document(text)},
             ],
             "stream": False,
             "format": "json",
@@ -105,4 +106,5 @@ class OllamaClient(LLMClient):
 
         raw = ((body.get("message") or {}).get("content")) or ""
         parsed = parse_model_json(raw)
-        return build_classify_result(parsed, self._model)
+        result = build_classify_result(parsed, self._model)
+        return apply_security_checks(text, result)
